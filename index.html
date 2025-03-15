@@ -43,29 +43,34 @@
         // PDF.js configuration
         pdfjsLib.GlobalWorkerOptions.workerSrc = 'https://cdnjs.cloudflare.com/ajax/libs/pdf.js/2.6.347/pdf.worker.min.js';
 
+        // Initialize audio context
+        document.addEventListener('click', initAudio, { once: true });
+
+        function initAudio() {
+            // Wake up audio context
+            const silentAudio = new Audio('data:audio/wav;base64,UklGRl9vT19XQVZFZm10IBAAAAABAAEAQB8AAEAfAAABAAgAZGF0YU');
+            silentAudio.play().then(() => silentAudio.pause());
+            window.audioContextInitialized = true;
+        }
+
         document.getElementById('pdfInput').addEventListener('change', function(e) {
             const file = e.target.files[0];
             if (file) loadPDF(file);
         });
 
-        document.getElementById('playBtn').addEventListener('click', function() {
-            if (!isPlaying) {
-                startReading();
-            } else {
-                pauseReading();
-            }
-        });
+        document.getElementById('playBtn').addEventListener('click', togglePlay);
 
         async function loadPDF(file) {
             showLoader();
+            textItems = [];
             const reader = new FileReader();
             reader.onload = async function(e) {
                 try {
                     const pdf = await pdfjsLib.getDocument({ data: e.target.result }).promise;
                     currentPDF = pdf;
-                    textItems = [];
                     await renderPage(pdf);
                     await extractText(pdf);
+                    console.log('Extracted text:', textItems.join(' ')); // Debug text extraction
                     hideLoader();
                 } catch (error) {
                     console.error('Error loading PDF:', error);
@@ -73,21 +78,6 @@
                 }
             };
             reader.readAsArrayBuffer(file);
-        }
-
-        async function renderPage(pdf, pageNum = 1) {
-            const page = await pdf.getPage(pageNum);
-            const viewport = page.getViewport({ scale: 1.5 });
-            const canvas = document.getElementById('pdf-canvas');
-            const context = canvas.getContext('2d');
-            
-            canvas.height = viewport.height;
-            canvas.width = viewport.width;
-            
-            await page.render({
-                canvasContext: context,
-                viewport: viewport
-            }).promise;
         }
 
         async function extractText(pdf) {
@@ -99,9 +89,18 @@
                         text: item.str,
                         x: item.transform[4],
                         y: item.transform[5],
-                        page: i
+                        page: i,
+                        charCount: item.str.length
                     });
                 });
+            }
+        }
+
+        function togglePlay() {
+            if (!isPlaying) {
+                startReading();
+            } else {
+                pauseReading();
             }
         }
 
@@ -110,14 +109,21 @@
                 alert('No text found in PDF');
                 return;
             }
-            
+
+            if (synth.paused) {
+                synth.resume();
+                isPlaying = true;
+                updatePlayButton();
+                return;
+            }
+
             isPlaying = true;
-            document.getElementById('playBtn').textContent = '⏸️ Pause';
-            
+            updatePlayButton();
+
             const fullText = textItems.map(item => item.text).join(' ');
             utterance = new SpeechSynthesisUtterance(fullText);
-            utterance.rate = document.getElementById('speed').value;
-            
+            utterance.rate = parseFloat(document.getElementById('speed').value);
+
             utterance.onboundary = (event) => {
                 currentCharIndex = event.charIndex;
                 const currentItem = findTextItemAtPosition(event.charIndex);
@@ -126,35 +132,47 @@
                     scrollToText(currentItem);
                 }
             };
-            
+
             utterance.onend = () => {
                 isPlaying = false;
-                document.getElementById('playBtn').textContent = '▶️ Play';
+                updatePlayButton();
             };
-            
+
             synth.speak(utterance);
         }
 
         function pauseReading() {
             synth.pause();
             isPlaying = false;
-            document.getElementById('playBtn').textContent = '▶️ Play';
+            updatePlayButton();
         }
 
         function stopReading() {
             synth.cancel();
             isPlaying = false;
-            document.getElementById('playBtn').textContent = '▶️ Play';
+            updatePlayButton();
             clearHighlights();
         }
 
+        function changeSpeed() {
+            if (synth.speaking || synth.paused) {
+                synth.cancel();
+                startReading();
+            }
+        }
+
+        // Helper functions
         function findTextItemAtPosition(charIndex) {
             let count = 0;
             for (const item of textItems) {
-                count += item.text.length + 1; // +1 for space
+                count += item.text.length + 1;
                 if (count > charIndex) return item;
             }
             return null;
+        }
+
+        function updatePlayButton() {
+            document.getElementById('playBtn').textContent = isPlaying ? '⏸️ Pause' : '▶️ Play';
         }
 
         function highlightText(textItem) {
@@ -182,12 +200,6 @@
             document.querySelectorAll('.highlight').forEach(el => el.remove());
         }
 
-        function changeSpeed() {
-            if (synth.speaking && utterance) {
-                utterance.rate = document.getElementById('speed').value;
-            }
-        }
-
         function showLoader() {
             document.querySelector('.loader').style.display = 'block';
         }
@@ -195,17 +207,6 @@
         function hideLoader() {
             document.querySelector('.loader').style.display = 'none';
         }
-
-        // Initialize audio context for mobile compatibility
-        document.addEventListener('click', function initAudio() {
-            if (synth && !window.audioContextInitialized) {
-                // Play/pause a silent audio to initialize audio context
-                const silentAudio = new Audio('data:audio/wav;base64,UklGRl9vT19XQVZFZm10IBAAAAABAAEAQB8AAEAfAAABAAgAZGF0YU');
-                silentAudio.play().then(() => silentAudio.pause());
-                window.audioContextInitialized = true;
-                document.removeEventListener('click', initAudio);
-            }
-        });
     </script>
 </body>
 </html>
