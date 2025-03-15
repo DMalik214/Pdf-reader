@@ -1,88 +1,156 @@
 <!DOCTYPE html>
 <html>
 <head>
-    <title>PDF Voice Reader</title>
+    <title>Interactive PDF Voice Reader</title>
     <meta name="viewport" content="width=device-width, initial-scale=1.0">
     <style>
-        body { font-family: Arial, sans-serif; padding: 20px; }
-        #pdf-viewer { width: 100%; height: 300px; border: 1px solid #ccc; margin: 10px 0; padding: 10px; overflow-y: auto; }
-        .controls { display: flex; gap: 10px; flex-wrap: wrap; }
-        button { padding: 10px; background: #007bff; color: white; border: none; border-radius: 5px; }
-        input[type="file"] { margin: 10px 0; }
+        body { font-family: Arial, sans-serif; margin: 0; padding: 20px; }
+        #pdf-container { width: 100%; height: 70vh; border: 1px solid #ccc; margin: 10px 0; overflow: auto; }
+        .controls { position: fixed; bottom: 0; left: 0; right: 0; background: white; padding: 10px; box-shadow: 0 -2px 10px rgba(0,0,0,0.1); }
+        button { padding: 10px; margin: 5px; background: #007bff; color: white; border: none; border-radius: 5px; }
+        .highlight { background: yellow; transition: background 0.3s; }
+        #pdf-canvas { margin: 10px auto; box-shadow: 0 0 5px rgba(0,0,0,0.2); }
     </style>
 </head>
 <body>
-    <h2>PDF Voice Reader</h2>
+    <h2>Interactive PDF Voice Reader</h2>
     <input type="file" id="pdfInput" accept="application/pdf">
-    <div id="pdf-viewer"></div>
+    <div id="pdf-container">
+        <canvas id="pdf-canvas"></canvas>
+    </div>
     <div class="controls">
-        <button onclick="playPause()">▶️/⏸️</button>
-        <button onclick="stop()">⏹️</button>
-        <label>Speed:
-            <select id="speed" onchange="changeSpeed()">
-                <option value="0.5">0.5x</option>
-                <option value="1" selected>1x</option>
-                <option value="1.5">1.5x</option>
-                <option value="2">2x</option>
-            </select>
-        </label>
+        <button onclick="togglePlay()">▶️/⏸️</button>
+        <button onclick="stopReading()">⏹️</button>
+        <select id="speed" onchange="changeSpeed()">
+            <option value="0.5">0.5x</option>
+            <option value="1" selected>1x</option>
+            <option value="1.5">1.5x</option>
+            <option value="2">2x</option>
+        </select>
     </div>
 
     <script src="https://cdnjs.cloudflare.com/ajax/libs/pdf.js/2.6.347/pdf.min.js"></script>
     <script>
         let synth = window.speechSynthesis;
         let utterance = null;
-        let currentText = '';
-        let pausedPosition = 0;
+        let currentPDF = null;
+        let currentPage = 1;
+        let textItems = [];
+        let isPlaying = false;
+
+        // PDF.js configuration
+        pdfjsLib.GlobalWorkerOptions.workerSrc = 'https://cdnjs.cloudflare.com/ajax/libs/pdf.js/2.6.347/pdf.worker.min.js';
 
         document.getElementById('pdfInput').addEventListener('change', function(e) {
             const file = e.target.files[0];
-            if (file) {
-                const reader = new FileReader();
-                reader.onload = function(e) {
-                    readPDF(e.target.result);
-                };
-                reader.readAsArrayBuffer(file);
-            }
+            if (file) loadPDF(file);
         });
 
-        async function readPDF(data) {
-            const pdf = await pdfjsLib.getDocument({ data }).promise;
-            let text = '';
+        async function loadPDF(file) {
+            const reader = new FileReader();
+            reader.onload = async function(e) {
+                const pdf = await pdfjsLib.getDocument({ data: e.target.result }).promise;
+                currentPDF = pdf;
+                currentPage = 1;
+                renderPage(pdf);
+                extractText(pdf);
+            };
+            reader.readAsArrayBuffer(file);
+        }
+
+        async function renderPage(pdf, pageNum = 1) {
+            const page = await pdf.getPage(pageNum);
+            const viewport = page.getViewport({ scale: 1.5 });
+            const canvas = document.getElementById('pdf-canvas');
+            const context = canvas.getContext('2d');
+            
+            canvas.height = viewport.height;
+            canvas.width = viewport.width;
+            
+            await page.render({
+                canvasContext: context,
+                viewport: viewport
+            }).promise;
+        }
+
+        async function extractText(pdf) {
+            textItems = [];
             for (let i = 1; i <= pdf.numPages; i++) {
                 const page = await pdf.getPage(i);
                 const content = await page.getTextContent();
-                text += content.items.map(item => item.str).join(' ');
+                textItems.push(...content.items.map(item => ({
+                    text: item.str,
+                    x: item.transform[4],
+                    y: item.transform[5]
+                })));
             }
-            currentText = text;
-            document.getElementById('pdf-viewer').textContent = text;
         }
 
-        function playPause() {
-            if (!synth.speaking && !synth.paused) {
-                utterance = new SpeechSynthesisUtterance(currentText);
-                utterance.rate = document.getElementById('speed').value;
-                synth.speak(utterance);
-            } else if (synth.speaking && !synth.paused) {
+        function togglePlay() {
+            if (!isPlaying) {
+                startReading();
+            } else {
                 synth.pause();
-                pausedPosition = synth.currentTextCharIndex;
-            } else if (synth.paused) {
-                synth.resume();
             }
+            isPlaying = !isPlaying;
         }
 
-        function stop() {
+        function startReading() {
+            if (!textItems.length) return;
+            
+            utterance = new SpeechSynthesisUtterance(textItems.map(item => item.text).join(' '));
+            utterance.rate = document.getElementById('speed').value;
+            
+            utterance.onboundary = function(event) {
+                const currentText = textItems[event.charIndex];
+                highlightText(currentText);
+                scrollToText(currentText);
+            };
+            
+            synth.speak(utterance);
+        }
+
+        function highlightText(textItem) {
+            const canvas = document.getElementById('pdf-canvas');
+            const rect = canvas.getBoundingClientRect();
+            
+            const highlight = document.createElement('div');
+            highlight.className = 'highlight';
+            highlight.style.position = 'absolute';
+            highlight.style.left = `${textItem.x + rect.left}px`;
+            highlight.style.top = `${textItem.y + rect.top}px`;
+            highlight.style.width = '200px';
+            highlight.style.height = '20px';
+            
+            document.body.appendChild(highlight);
+            setTimeout(() => highlight.remove(), 1000);
+        }
+
+        function scrollToText(textItem) {
+            const container = document.getElementById('pdf-container');
+            const canvas = document.getElementById('pdf-canvas');
+            const textY = textItem.y * 1.5; // Adjust for scaling factor
+            container.scrollTop = textY - container.offsetHeight/2;
+        }
+
+        function stopReading() {
             synth.cancel();
-            pausedPosition = 0;
+            isPlaying = false;
         }
 
         function changeSpeed() {
             if (synth.speaking && utterance) {
                 utterance.rate = document.getElementById('speed').value;
-                synth.pause();
-                synth.resume();
             }
         }
+
+        // Handle mobile touch events
+        document.getElementById('pdf-canvas').addEventListener('click', function(e) {
+            if (isPlaying) {
+                synth.pause();
+                isPlaying = false;
+            }
+        });
     </script>
 </body>
 </html>
