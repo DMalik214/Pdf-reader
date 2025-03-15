@@ -8,19 +8,21 @@
         #pdf-container { width: 100%; height: 70vh; border: 1px solid #ccc; margin: 10px 0; overflow: auto; }
         .controls { position: fixed; bottom: 0; left: 0; right: 0; background: white; padding: 10px; box-shadow: 0 -2px 10px rgba(0,0,0,0.1); }
         button { padding: 10px; margin: 5px; background: #007bff; color: white; border: none; border-radius: 5px; }
-        .highlight { background: yellow; transition: background 0.3s; }
+        .highlight { background: rgba(255,255,0,0.5); position: absolute; }
         #pdf-canvas { margin: 10px auto; box-shadow: 0 0 5px rgba(0,0,0,0.2); }
+        .loader { display: none; position: fixed; top: 50%; left: 50%; transform: translate(-50%, -50%); }
     </style>
 </head>
 <body>
     <h2>Interactive PDF Voice Reader</h2>
     <input type="file" id="pdfInput" accept="application/pdf">
+    <div class="loader">Loading...</div>
     <div id="pdf-container">
         <canvas id="pdf-canvas"></canvas>
     </div>
     <div class="controls">
-        <button onclick="togglePlay()">▶️/⏸️</button>
-        <button onclick="stopReading()">⏹️</button>
+        <button id="playBtn">▶️ Play</button>
+        <button onclick="stopReading()">⏹️ Stop</button>
         <select id="speed" onchange="changeSpeed()">
             <option value="0.5">0.5x</option>
             <option value="1" selected>1x</option>
@@ -34,9 +36,9 @@
         let synth = window.speechSynthesis;
         let utterance = null;
         let currentPDF = null;
-        let currentPage = 1;
         let textItems = [];
         let isPlaying = false;
+        let currentCharIndex = 0;
 
         // PDF.js configuration
         pdfjsLib.GlobalWorkerOptions.workerSrc = 'https://cdnjs.cloudflare.com/ajax/libs/pdf.js/2.6.347/pdf.worker.min.js';
@@ -46,14 +48,29 @@
             if (file) loadPDF(file);
         });
 
+        document.getElementById('playBtn').addEventListener('click', function() {
+            if (!isPlaying) {
+                startReading();
+            } else {
+                pauseReading();
+            }
+        });
+
         async function loadPDF(file) {
+            showLoader();
             const reader = new FileReader();
             reader.onload = async function(e) {
-                const pdf = await pdfjsLib.getDocument({ data: e.target.result }).promise;
-                currentPDF = pdf;
-                currentPage = 1;
-                renderPage(pdf);
-                extractText(pdf);
+                try {
+                    const pdf = await pdfjsLib.getDocument({ data: e.target.result }).promise;
+                    currentPDF = pdf;
+                    textItems = [];
+                    await renderPage(pdf);
+                    await extractText(pdf);
+                    hideLoader();
+                } catch (error) {
+                    console.error('Error loading PDF:', error);
+                    hideLoader();
+                }
             };
             reader.readAsArrayBuffer(file);
         }
@@ -74,68 +91,95 @@
         }
 
         async function extractText(pdf) {
-            textItems = [];
             for (let i = 1; i <= pdf.numPages; i++) {
                 const page = await pdf.getPage(i);
                 const content = await page.getTextContent();
-                textItems.push(...content.items.map(item => ({
-                    text: item.str,
-                    x: item.transform[4],
-                    y: item.transform[5]
-                })));
+                content.items.forEach(item => {
+                    textItems.push({
+                        text: item.str,
+                        x: item.transform[4],
+                        y: item.transform[5],
+                        page: i
+                    });
+                });
             }
-        }
-
-        function togglePlay() {
-            if (!isPlaying) {
-                startReading();
-            } else {
-                synth.pause();
-            }
-            isPlaying = !isPlaying;
         }
 
         function startReading() {
-            if (!textItems.length) return;
+            if (!textItems.length) {
+                alert('No text found in PDF');
+                return;
+            }
             
-            utterance = new SpeechSynthesisUtterance(textItems.map(item => item.text).join(' '));
+            isPlaying = true;
+            document.getElementById('playBtn').textContent = '⏸️ Pause';
+            
+            const fullText = textItems.map(item => item.text).join(' ');
+            utterance = new SpeechSynthesisUtterance(fullText);
             utterance.rate = document.getElementById('speed').value;
             
-            utterance.onboundary = function(event) {
-                const currentText = textItems[event.charIndex];
-                highlightText(currentText);
-                scrollToText(currentText);
+            utterance.onboundary = (event) => {
+                currentCharIndex = event.charIndex;
+                const currentItem = findTextItemAtPosition(event.charIndex);
+                if (currentItem) {
+                    highlightText(currentItem);
+                    scrollToText(currentItem);
+                }
+            };
+            
+            utterance.onend = () => {
+                isPlaying = false;
+                document.getElementById('playBtn').textContent = '▶️ Play';
             };
             
             synth.speak(utterance);
         }
 
-        function highlightText(textItem) {
-            const canvas = document.getElementById('pdf-canvas');
-            const rect = canvas.getBoundingClientRect();
-            
-            const highlight = document.createElement('div');
-            highlight.className = 'highlight';
-            highlight.style.position = 'absolute';
-            highlight.style.left = `${textItem.x + rect.left}px`;
-            highlight.style.top = `${textItem.y + rect.top}px`;
-            highlight.style.width = '200px';
-            highlight.style.height = '20px';
-            
-            document.body.appendChild(highlight);
-            setTimeout(() => highlight.remove(), 1000);
-        }
-
-        function scrollToText(textItem) {
-            const container = document.getElementById('pdf-container');
-            const canvas = document.getElementById('pdf-canvas');
-            const textY = textItem.y * 1.5; // Adjust for scaling factor
-            container.scrollTop = textY - container.offsetHeight/2;
+        function pauseReading() {
+            synth.pause();
+            isPlaying = false;
+            document.getElementById('playBtn').textContent = '▶️ Play';
         }
 
         function stopReading() {
             synth.cancel();
             isPlaying = false;
+            document.getElementById('playBtn').textContent = '▶️ Play';
+            clearHighlights();
+        }
+
+        function findTextItemAtPosition(charIndex) {
+            let count = 0;
+            for (const item of textItems) {
+                count += item.text.length + 1; // +1 for space
+                if (count > charIndex) return item;
+            }
+            return null;
+        }
+
+        function highlightText(textItem) {
+            clearHighlights();
+            const canvas = document.getElementById('pdf-canvas');
+            const rect = canvas.getBoundingClientRect();
+            
+            const highlight = document.createElement('div');
+            highlight.className = 'highlight';
+            highlight.style.left = `${textItem.x * 1.5 + rect.left}px`;
+            highlight.style.top = `${textItem.y * 1.5 + rect.top}px`;
+            highlight.style.width = `${textItem.text.length * 8}px`;
+            highlight.style.height = '20px';
+            
+            document.body.appendChild(highlight);
+        }
+
+        function scrollToText(textItem) {
+            const container = document.getElementById('pdf-container');
+            const textY = textItem.y * 1.5;
+            container.scrollTop = textY - container.offsetHeight/2;
+        }
+
+        function clearHighlights() {
+            document.querySelectorAll('.highlight').forEach(el => el.remove());
         }
 
         function changeSpeed() {
@@ -144,11 +188,22 @@
             }
         }
 
-        // Handle mobile touch events
-        document.getElementById('pdf-canvas').addEventListener('click', function(e) {
-            if (isPlaying) {
-                synth.pause();
-                isPlaying = false;
+        function showLoader() {
+            document.querySelector('.loader').style.display = 'block';
+        }
+
+        function hideLoader() {
+            document.querySelector('.loader').style.display = 'none';
+        }
+
+        // Initialize audio context for mobile compatibility
+        document.addEventListener('click', function initAudio() {
+            if (synth && !window.audioContextInitialized) {
+                // Play/pause a silent audio to initialize audio context
+                const silentAudio = new Audio('data:audio/wav;base64,UklGRl9vT19XQVZFZm10IBAAAAABAAEAQB8AAEAfAAABAAgAZGF0YU');
+                silentAudio.play().then(() => silentAudio.pause());
+                window.audioContextInitialized = true;
+                document.removeEventListener('click', initAudio);
             }
         });
     </script>
